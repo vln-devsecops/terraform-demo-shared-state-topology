@@ -11,6 +11,23 @@ resource "aws_s3_bucket" "shared_logs" {
   }
 }
 
+# SSE-S3, not SSE-KMS: this bucket is a server access-logs delivery
+# destination, and the S3 logging service principal cannot write to a
+# KMS-encrypted bucket (see the rule's own note at
+# https://avd.aquasec.com/misconfig/aws-0132).
+#trivy:ignore:AWS-0132
+resource "aws_s3_bucket_server_side_encryption_configuration" "shared_logs" {
+  count = local.is_devops ? 1 : 0
+
+  bucket = aws_s3_bucket.shared_logs[0].id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
 resource "aws_s3_bucket_public_access_block" "shared_logs" {
   count = local.is_devops ? 1 : 0
 

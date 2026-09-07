@@ -12,6 +12,30 @@ resource "aws_s3_bucket" "site" {
   }
 }
 
+# SSE-S3 is a deliberate choice for this lean, ephemeral demo site bucket - a
+# customer-managed KMS key adds cost/complexity with no benefit here (no
+# sensitive data, torn down after each test).
+#trivy:ignore:AWS-0132
+resource "aws_s3_bucket_server_side_encryption_configuration" "site" {
+  count = local.is_app ? 1 : 0
+
+  bucket = aws_s3_bucket.site[0].id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+# All four flags false is deliberate, not an oversight: this bucket serves a
+# public static website (plain S3 website hosting, no CloudFront - see the
+# repo README for why) and the public bucket policy below requires public
+# access to not be blocked.
+#trivy:ignore:AWS-0086 public static website, no CloudFront - see README
+#trivy:ignore:AWS-0087 public static website, no CloudFront - see README
+#trivy:ignore:AWS-0091 public static website, no CloudFront - see README
+#trivy:ignore:AWS-0093 public static website, no CloudFront - see README
 resource "aws_s3_bucket_public_access_block" "site" {
   count = local.is_app ? 1 : 0
 
