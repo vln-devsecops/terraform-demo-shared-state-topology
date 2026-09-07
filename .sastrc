@@ -1,0 +1,30 @@
+# .sastrc - see vln-devsecops/actions-sast-sonarqube's README for schema.
+#
+# Every suppression below is the site bucket's public S3-website design
+# (plain S3 website hosting, no CloudFront - see README.md), not an
+# oversight:
+#   - S6270/S6281: the bucket must allow public read for the website to work
+#     (matches the #trivy:ignore:AWS-0086/0087/0091/0093 on the same
+#     resource in infra/fn_site.tf).
+#   - S6249 (HTTPS-only): S3 website *endpoints* (as opposed to the REST API
+#     endpoint) only ever serve plain HTTP - there is no TLS option without
+#     CloudFront in front, which is deliberately out of scope here. An
+#     aws:SecureTransport deny policy would block every website request,
+#     including legitimate ones.
+#   - S6258 (logging): the site bucket's access logging IS configured, via
+#     the separate aws_s3_bucket_logging.site resource (current AWS provider
+#     versions split what used to be one resource's inline `logging` block
+#     into two) - Sonar's analyzer doesn't associate the two, so this is a
+#     false positive, not a gap. rg_logging.tf's shared_logs bucket also
+#     hits this rule: it's the log-delivery destination itself, and
+#     server-access-logging a log bucket to itself is neither useful nor
+#     configured intentionally.
+ignore:
+  - rule: "terraform:S6270"
+    paths: ["infra/fn_site.tf"]
+  - rule: "terraform:S6281"
+    paths: ["infra/fn_site.tf"]
+  - rule: "terraform:S6249"
+    paths: ["infra/fn_site.tf"]
+  - rule: "terraform:S6258"
+    paths: ["infra/fn_site.tf", "infra/rg_logging.tf"]
