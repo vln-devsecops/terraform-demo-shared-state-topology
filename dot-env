@@ -1,0 +1,20 @@
+# Copy to .env and adjust.
+# Set to 1 for complex repos that should only bootstrap in a dev container.
+USE_DEVCONTAINER=0
+
+# Required: set the AWS CLI profile for the target account.
+AWS_PROFILE=your-aws-profile
+AWS_REGION=us-east-1
+EXPECTED_AWS_ACCOUNT_ID=
+
+# Optional override for bucket base; by default bootstrap derives this from
+# AWS Organizations metadata and appends the account-hash suffix.
+# TF_STATE_BUCKET_BASE=vln-devsecops-terraform-state
+# Optional override to bypass derived naming:
+# TF_STATE_BUCKET=my-precreated-terraform-state-bucket
+TF_ROOT=infra
+
+# Which environment to bootstrap (must match a directory under
+# infra/environments/, e.g. devops, dev, prod) is passed as an argument to
+# ./bootstrap, not set here - e.g. `source ./bootstrap devops`. Defaults to
+# dev when omitted.

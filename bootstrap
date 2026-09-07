@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+# Source from repo root: source ./bootstrap [environment]
+# environment defaults to "dev" and must have a matching directory under
+# infra/environments/ (see terraform-infrastructure-organization.md's
+# multi-environment state topology). Example: source ./bootstrap devops
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  echo "Run this script by sourcing it: source ./bootstrap [environment]"
+  exit 1
+fi
+
+_bootstrap_prompt_yes_no() {
+  local prompt="$1"
+  local answer
+  read -r -p "${prompt} [y/N]: " answer
+  [[ "${answer}" =~ ^[Yy]$ ]]
+}
+
+REQUESTED_ENVIRONMENT="${1:-}"
+
+if [[ "${USE_DEVCONTAINER:-0}" == "1" ]] || [[ -f .devcontainer/devcontainer.json ]]; then
+  echo "This repository is expected to run from a dev container."
+  echo "Open in the dev container and source bootstrap there."
+  return 1
+fi
+
+PYTHON_BIN=""
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+else
+  echo "Missing required tooling: python3 or python"
+  echo "Install Python 3, then source bootstrap again."
+  return 1
+fi
+
+PYTHON_MAJOR="$(${PYTHON_BIN} -c 'import sys; print(sys.version_info[0])' 2>/dev/null || true)"
+if [[ "${PYTHON_MAJOR}" != "3" ]]; then
+  echo "${PYTHON_BIN} is not Python 3."
+  echo "Install Python 3 and ensure python/python3 points to it."
+  return 1
+fi
+
+if [[ ! -f .env ]]; then
+  if [[ ! -f dot-env ]]; then
+    echo "Missing dot-env template in repository root."
+    return 1
+  fi
+
+  if _bootstrap_prompt_yes_no ".env is missing. Create it from dot-env now?"; then
+    cp dot-env .env
+    echo "Created .env from dot-env. Please fill in values, then source bootstrap again."
+    return 1
+  else
+    echo "Cannot continue without .env."
+    return 1
+  fi
+fi
+
+# shellcheck disable=SC1091
+source ./.env
+
+if [[ ! -d .venv ]]; then
+  "${PYTHON_BIN}" -m venv .venv
+fi
+
+# shellcheck disable=SC1091
+source .venv/bin/activate
+
+if ! command -v aws >/dev/null 2>&1; then
+  echo "AWS CLI not found. Installing awscli in .venv..."
+  python -m pip install --upgrade pip >/dev/null
+  python -m pip install awscli
+fi
+
+if ! command -v terraform >/dev/null 2>&1; then
+  echo "Missing required tooling: terraform"
+  echo "Install Terraform, then source bootstrap again."
+  return 1
+fi
+
+AWS_PROFILE="${AWS_PROFILE:-}"
+AWS_REGION="${AWS_REGION:-us-east-1}"
+if [[ -z "${AWS_PROFILE}" ]]; then
+  echo "AWS_PROFILE is not set. Define it in .env and source bootstrap again."
+  return 1
+fi
+export AWS_PROFILE
+export AWS_DEFAULT_PROFILE="${AWS_PROFILE}"
+export AWS_REGION
+export AWS_DEFAULT_REGION="${AWS_REGION}"
+
+TF_STATE_BUCKET_BASE="${TF_STATE_BUCKET_BASE:-}"
+TF_STATE_BUCKET="${TF_STATE_BUCKET:-}"
+EXPECTED_AWS_ACCOUNT_ID="${EXPECTED_AWS_ACCOUNT_ID:-}"
+ORG_NAME=""
+ORG_ID=""
+
+if [[ -z "${TF_STATE_BUCKET}" ]]; then
+  ACCOUNT_ID="$(AWS_PROFILE="${AWS_PROFILE}" aws sts get-caller-identity --query Account --output text 2>/dev/null)"
+  if [[ -z "${ACCOUNT_ID}" || "${ACCOUNT_ID}" == "None" ]]; then
+    echo "Unable to resolve AWS account for profile ${AWS_PROFILE}."
+    return 1
+  fi
+
+  if [[ -n "${EXPECTED_AWS_ACCOUNT_ID}" && "${ACCOUNT_ID}" != "${EXPECTED_AWS_ACCOUNT_ID}" ]]; then
+    echo "AWS account mismatch for profile ${AWS_PROFILE}."
+    echo "Expected ${EXPECTED_AWS_ACCOUNT_ID}, got ${ACCOUNT_ID}."
+    echo "Update AWS_PROFILE (or EXPECTED_AWS_ACCOUNT_ID) in .env and source bootstrap again."
+    return 1
+  fi
+
+  SUFFIX="$(printf '%s' "${ACCOUNT_ID}" | sha256sum | cut -c1-8)"
+
+  if [[ -z "${TF_STATE_BUCKET_BASE}" ]]; then
+    ORG_ID="$(AWS_PROFILE="${AWS_PROFILE}" aws organizations describe-organization --query 'Organization.Id' --output text 2>/dev/null || true)"
+    if [[ -z "${ORG_ID}" || "${ORG_ID}" == "None" ]]; then
+      echo "Unable to resolve AWS organization ID for profile ${AWS_PROFILE}."
+      echo "Set TF_STATE_BUCKET_BASE or TF_STATE_BUCKET in .env, or grant organizations:DescribeOrganization."
+      return 1
+    fi
+
+    ORG_NAME="$(AWS_PROFILE="${AWS_PROFILE}" aws organizations list-tags-for-resource --resource-id "${ORG_ID}" --query "Tags[?Key=='Name'].Value | [0]" --output text 2>/dev/null || true)"
+    if [[ -z "${ORG_NAME}" || "${ORG_NAME}" == "None" ]]; then
+      ORG_NAME="$(AWS_PROFILE="${AWS_PROFILE}" aws iam list-account-aliases --query 'AccountAliases[0]' --output text 2>/dev/null || true)"
+    fi
+
+    if [[ -n "${ORG_NAME}" && "${ORG_NAME}" != "None" ]]; then
+      SANITIZED_ORG="$(printf '%s' "${ORG_NAME}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//; s/-+/-/g')"
+      TF_STATE_BUCKET_BASE="${SANITIZED_ORG}"
+      echo "Resolved AWS organization: ${ORG_NAME} (${ORG_ID})"
+    else
+      # <org-name>-<derived-suffix>, matching terraform-state-backend-standard.md
+      # and generate_tfstate_suffix.sh - no "-terraform-state-" infix.
+      EXISTING_BUCKET="$(AWS_PROFILE="${AWS_PROFILE}" aws s3api list-buckets --query "Buckets[?ends_with(Name, '-${SUFFIX}')].Name | [0]" --output text 2>/dev/null || true)"
+      if [[ -n "${EXISTING_BUCKET}" && "${EXISTING_BUCKET}" != "None" ]]; then
+        TF_STATE_BUCKET_BASE="${EXISTING_BUCKET%-"${SUFFIX}"}"
+        echo "Using existing state bucket base from account inventory: ${TF_STATE_BUCKET_BASE}"
+      else
+        SANITIZED_ORG="$(printf '%s' "org-${ORG_ID}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//; s/-+/-/g')"
+        TF_STATE_BUCKET_BASE="${SANITIZED_ORG}"
+        echo "Falling back to organization-id-based state bucket base: ${TF_STATE_BUCKET_BASE}"
+      fi
+    fi
+  fi
+
+  TF_STATE_BUCKET="${TF_STATE_BUCKET_BASE}-${SUFFIX}"
+fi
+
+echo "Resolved AWS profile: ${AWS_PROFILE}"
+echo "Resolved AWS organization: ${ORG_NAME:-n/a} (${ORG_ID:-n/a})"
+echo "Resolved AWS account: ${ACCOUNT_ID}"
+echo "Derived bucket suffix from account ID: ${SUFFIX}"
+echo "Terraform state bucket candidate: ${TF_STATE_BUCKET}"
+
+if ! AWS_PROFILE="${AWS_PROFILE}" aws s3api head-bucket --bucket "${TF_STATE_BUCKET}" >/dev/null 2>&1; then
+  echo "State bucket ${TF_STATE_BUCKET} does not exist or is not accessible."
+  echo "Option 1: set TF_STATE_BUCKET in .env to an existing bucket."
+  echo "Option 2: create this bucket now."
+  if _bootstrap_prompt_yes_no "Create ${TF_STATE_BUCKET} now?"; then
+    if [[ "${AWS_REGION}" == "us-east-1" ]]; then
+      AWS_PROFILE="${AWS_PROFILE}" aws s3api create-bucket --bucket "${TF_STATE_BUCKET}" --region "${AWS_REGION}" >/dev/null
+    else
+      AWS_PROFILE="${AWS_PROFILE}" aws s3api create-bucket --bucket "${TF_STATE_BUCKET}" --region "${AWS_REGION}" --create-bucket-configuration LocationConstraint="${AWS_REGION}" >/dev/null
+    fi
+    AWS_PROFILE="${AWS_PROFILE}" aws s3api put-bucket-versioning --bucket "${TF_STATE_BUCKET}" --versioning-configuration Status=Enabled >/dev/null
+    AWS_PROFILE="${AWS_PROFILE}" aws s3api put-public-access-block --bucket "${TF_STATE_BUCKET}" --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true >/dev/null
+    AWS_PROFILE="${AWS_PROFILE}" aws s3api put-bucket-encryption --bucket "${TF_STATE_BUCKET}" --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}' >/dev/null
+  else
+    echo "Set TF_STATE_BUCKET in .env, then source bootstrap again."
+    return 1
+  fi
+fi
+
+TF_ROOT="${TF_ROOT:-infra}"
+if [[ ! -d "${TF_ROOT}" ]]; then
+  echo "Terraform root ${TF_ROOT} not found. Set TF_ROOT in .env."
+  return 1
+fi
+
+ENVIRONMENTS_DIR="${TF_ROOT}/environments"
+AVAILABLE_ENVIRONMENTS=()
+for candidate in "${ENVIRONMENTS_DIR}"/*; do
+  [[ -d "${candidate}" ]] || continue
+  [[ -f "${candidate}/backend.hcl" && -f "${candidate}/terraform.tfvars" ]] || continue
+  AVAILABLE_ENVIRONMENTS+=("$(basename "${candidate}")")
+done
+
+if [[ ${#AVAILABLE_ENVIRONMENTS[@]} -eq 0 ]]; then
+  echo "No valid environments found under ${ENVIRONMENTS_DIR} (each needs backend.hcl and terraform.tfvars)."
+  return 1
+fi
+
+ENVIRONMENT="${REQUESTED_ENVIRONMENT:-dev}"
+ENVIRONMENT_VALID=false
+for env in "${AVAILABLE_ENVIRONMENTS[@]}"; do
+  if [[ "${ENVIRONMENT}" == "${env}" ]]; then
+    ENVIRONMENT_VALID=true
+    break
+  fi
+done
+if [[ "${ENVIRONMENT_VALID}" != true ]]; then
+  echo "Unknown environment '${ENVIRONMENT}'. Available: ${AVAILABLE_ENVIRONMENTS[*]}"
+  return 1
+fi
+
+(
+  cd "${TF_ROOT}" || exit 1
+
+  BACKEND_TEMPLATE="environments/${ENVIRONMENT}/backend.hcl"
+  BACKEND_CONFIG="${BACKEND_TEMPLATE}"
+  TEMP_BACKEND_FILE=""
+  if grep -q "REPLACE_ME_TF_STATE_BUCKET" "${BACKEND_TEMPLATE}"; then
+    TEMP_BACKEND_FILE="$(mktemp)"
+    sed -e "s/REPLACE_ME_TF_STATE_BUCKET/${TF_STATE_BUCKET}/g" \
+      "${BACKEND_TEMPLATE}" > "${TEMP_BACKEND_FILE}"
+    BACKEND_CONFIG="${TEMP_BACKEND_FILE}"
+  fi
+
+  cleanup() {
+    [[ -n "${TEMP_BACKEND_FILE}" && -f "${TEMP_BACKEND_FILE}" ]] && rm -f "${TEMP_BACKEND_FILE}"
+  }
+  trap cleanup EXIT
+
+  terraform init \
+    -reconfigure \
+    -backend-config="${BACKEND_CONFIG}"
+
+  # Picked up automatically by any plan/apply run from this root (*.auto.tfvars
+  # loads without -var-file). selected_environment cross-checks against
+  # environments/<env>/terraform.tfvars's own deployment_environment. devops's
+  # own state doesn't need shared_state_bucket/region (it has nothing to read
+  # via terraform_remote_state), so they're only written for dev/prod.
+  {
+    echo "selected_environment = \"${ENVIRONMENT}\""
+    if [[ "${ENVIRONMENT}" != "devops" ]]; then
+      echo "shared_state_bucket = \"${TF_STATE_BUCKET}\""
+      echo "shared_state_region = \"${AWS_REGION}\""
+    fi
+  } > bootstrap.auto.tfvars
+)
+
+echo
+echo "Bootstrap complete for environment: ${ENVIRONMENT}"
+echo "Next, run a plan for this environment:"
+echo "  cd ${TF_ROOT}"
+echo "  terraform plan -out plan.tfplan -var-file=environments/${ENVIRONMENT}/terraform.tfvars"

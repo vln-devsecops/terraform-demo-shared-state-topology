@@ -1,0 +1,55 @@
+---
+name: ci_terraform
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    env:
+      TRIVY_VERSION: "0.70.0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+
+      - name: Validate
+        working-directory: infra
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+      # Fully offline: mock_provider "aws" in tests/ownership.tftest.hcl
+      # means this needs no AWS credentials.
+      - name: Run ownership tests
+        working-directory: infra
+        run: terraform test
+
+      - name: Install Trivy
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.local/bin"
+          curl -fsSL -o /tmp/trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          tar -xzf /tmp/trivy.tar.gz -C "${HOME}/.local/bin" trivy
+          chmod +x "${HOME}/.local/bin/trivy"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: Run Trivy config scan
+        run: trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 infra

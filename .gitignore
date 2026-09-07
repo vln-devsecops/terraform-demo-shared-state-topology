@@ -1,0 +1,7 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+bootstrap.auto.tfvars
+.env
+.venv/
