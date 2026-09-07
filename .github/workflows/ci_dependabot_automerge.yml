@@ -1,12 +1,9 @@
 ---
 name: ci_dependabot_automerge
 
-# This file is maintained in vln-devsecops/guidance, which keeps two
-# byte-identical copies of it - one under .github/workflows/ and one under
-# scaffold/repository-compliance/.github/workflows/ - and fails CI if they
-# drift. Change it there, not in place, and read
-# runbooks/dependabot-automerge.md first: every piece of this workflow is
-# load-bearing and most of it is not obvious.
+# The rationale for every non-obvious piece of this workflow is written up at
+# https://devsecops.vlinder.ca/runbooks/dependabot-automerge/ - read that
+# first if something here looks surprising.
 
 on:
   pull_request_target:
@@ -81,7 +78,7 @@ jobs:
             Dependabot auto-merge is disabled and this PR will not be merged
             automatically. Usually that means the auto-merge App is not
             installed here, which is the opt-in switch. See
-            runbooks/dependabot-automerge.md in vln-devsecops/guidance.
+            https://devsecops.vlinder.ca/runbooks/dependabot-automerge/.
         run: echo "::notice::$MSG"
 
       - name: Fetch Dependabot metadata
@@ -93,13 +90,13 @@ jobs:
 
       # `gh pr merge --auto` only actually waits for anything if the default
       # branch has a required status check configured via branch protection or
-      # a ruleset. Most repos in this portfolio have none - private repos on
-      # the Free plan get a 403 configuring one at all - and with nothing
-      # required, `--auto` merges the moment it is invoked, regardless of
-      # sibling jobs still running or already failed. That is what let
-      # node-dashboard#37 merge past a failing `plan` job. This step gates on
-      # the commit's own check runs instead, so it fails closed on every plan
-      # tier and does not depend on branch-protection config staying correct.
+      # a ruleset. Many repos have none - private repos on the Free plan get a
+      # 403 configuring one at all - and with nothing required, `--auto`
+      # merges the moment it is invoked, regardless of sibling jobs still
+      # running or already failed, which has let a Dependabot PR merge past a
+      # failing `plan` job in practice. This step gates on the commit's own
+      # check runs instead, so it fails closed on every plan tier and does
+      # not depend on branch-protection config staying correct.
       - name: Wait for other checks on this commit
         if: >
           steps.app-token.outputs.token != '' &&
@@ -158,9 +155,9 @@ jobs:
               #
               # Auto-merge is only supposed to be enabled once a repo has at
               # least one PR-triggered check (see
-              # runbooks/dependabot-automerge.md), so reaching this point
-              # means the repo is misconfigured. Say so, loudly, rather than
-              # merging and looking correct.
+              # https://devsecops.vlinder.ca/runbooks/dependabot-automerge/),
+              # so reaching this point means the repo is misconfigured. Say
+              # so, loudly, rather than merging and looking correct.
               echo "No sibling check runs appeared on $SHA within" \
                    "${settle_seconds}s. Refusing to auto-merge: there is" \
                    "nothing gating this PR. Add a PR-triggered check, or" \

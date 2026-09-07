@@ -1,9 +1,10 @@
 # terraform-demo-shared-state-topology
 
-A minimal, standalone demo of the org's
-[multi-environment (`devops`/`dev`/`prod`) shared-state topology](https://github.com/vln-devsecops/guidance/blob/main/standards/terraform-infrastructure-organization.md#multi-environment-state-topology-devopsdevprod),
-following the operational
-[shared-state discovery runbook](https://github.com/vln-devsecops/guidance/blob/main/runbooks/infra-shared-state-discovery.md).
+A minimal, standalone demo of Vlinder Software's DevSecOps [multi-environment
+(`devops`/`dev`/`prod`) shared-state topology](https://devsecops.vlinder.ca/runbooks/shared-state-discovery/) —
+the pattern used when several environments need to discover platform-owned shared resources (a
+shared certificate, a shared OIDC provider, a central logs bucket, and so on) without each
+environment recreating its own copy.
 
 **This repo is ephemeral.** It exists to show the topology working end-to-end, not to run
 persistently. Deploy it locally when you want to see the pattern, then tear it down (see
